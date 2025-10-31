@@ -2,16 +2,35 @@ package main
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
 	"time"
 
 	"golang.org/x/term"
 )
 
+// Game tuning constants
 const (
-	winScore    = 5
+	// Field dimensions
 	fieldWidth  = 50
 	fieldHeight = 15
+	goalSize    = 5 // Height of goal opening (total will be goalSize, centered)
+
+	// Gameplay
+	winScore   = 5
+	tickRate   = 50 * time.Millisecond
+	resetDelay = 1 * time.Second
+
+	// Ball physics
+	dribblePowerHorizontal = 2 // Horizontal kick strength
+	dribblePowerVertical   = 1 // Vertical kick strength
+	ballFriction           = 1 // Amount velocity decreases per tick
+
+	// Dribbling randomness (0.0 = none, 1.0 = max)
+	dribbleRandomness = 0
+
+	// Player starting positions (offset from edges)
+	playerStartOffset = 6
 )
 
 type Position struct {
@@ -19,9 +38,9 @@ type Position struct {
 }
 
 type Player struct {
-	pos    Position
-	char   rune
-	score  int
+	pos   Position
+	char  rune
+	score int
 }
 
 type Ball struct {
@@ -31,11 +50,15 @@ type Ball struct {
 }
 
 type Game struct {
-	playerA     *Player
-	playerB     *Player
-	ball        *Ball
-	running     bool
-	lastBallHit rune
+	playerA      *Player
+	playerB      *Player
+	ball         *Ball
+	running      bool
+	lastBallHit  rune
+	playerAStart Position
+	playerBStart Position
+	ballStart    Position
+	keysPressed  map[byte]bool
 }
 
 func main() {
@@ -46,11 +69,21 @@ func main() {
 }
 
 func game() error {
+	// rand.Seed(time.Now().UnixNano())
+
+	playerAStart := Position{x: playerStartOffset, y: fieldHeight / 2}
+	playerBStart := Position{x: fieldWidth - playerStartOffset - 1, y: fieldHeight / 2}
+	ballStart := Position{x: fieldWidth / 2, y: fieldHeight / 2}
+
 	g := &Game{
-		playerA: &Player{pos: Position{x: 5, y: fieldHeight / 2}, char: 'a'},
-		playerB: &Player{pos: Position{x: fieldWidth - 6, y: fieldHeight / 2}, char: 'b'},
-		ball:    &Ball{pos: Position{x: fieldWidth / 2, y: fieldHeight / 2}},
-		running: true,
+		playerA:      &Player{pos: playerAStart, char: 'a'},
+		playerB:      &Player{pos: playerBStart, char: 'b'},
+		ball:         &Ball{pos: ballStart},
+		running:      true,
+		playerAStart: playerAStart,
+		playerBStart: playerBStart,
+		ballStart:    ballStart,
+		keysPressed:  make(map[byte]bool),
 	}
 
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
@@ -65,12 +98,13 @@ func game() error {
 	inputChan := make(chan byte, 10)
 	go readInput(inputChan)
 
-	ticker := time.NewTicker(50 * time.Millisecond)
+	ticker := time.NewTicker(tickRate)
 	defer ticker.Stop()
 
 	for g.running {
 		select {
 		case <-ticker.C:
+			g.handleMovement()
 			g.updateBall()
 			g.render()
 
@@ -79,6 +113,8 @@ func game() error {
 			}
 		case key := <-inputChan:
 			g.handleInput(key)
+		default:
+			// Non-blocking
 		}
 	}
 
@@ -111,41 +147,129 @@ func readInput(ch chan byte) {
 
 func (g *Game) handleInput(key byte) {
 	switch key {
-	case 'w':
-		g.movePlayer(g.playerA, 0, -1)
-	case 's':
-		g.movePlayer(g.playerA, 0, 1)
-	case 'a':
-		g.movePlayer(g.playerA, -1, 0)
-	case 'd':
-		g.movePlayer(g.playerA, 1, 0)
-	case 'i':
-		g.movePlayer(g.playerB, 0, -1)
-	case 'k':
-		g.movePlayer(g.playerB, 0, 1)
-	case 'j':
-		g.movePlayer(g.playerB, -1, 0)
-	case 'l':
-		g.movePlayer(g.playerB, 1, 0)
 	case 'q':
 		g.running = false
+	case 'w', 's', 'a', 'd', 'i', 'k', 'j', 'l':
+		g.keysPressed[key] = true
+	case 27: // ESC - in case terminal sends escape sequences
+		// Clear any stuck keys
+		g.keysPressed = make(map[byte]bool)
 	}
+}
+
+func (g *Game) handleMovement() {
+	// Player A movement
+	dx, dy := 0, 0
+	if g.keysPressed['w'] {
+		dy = -1
+	}
+	if g.keysPressed['s'] {
+		dy = 1
+	}
+	if g.keysPressed['a'] {
+		dx = -1
+	}
+	if g.keysPressed['d'] {
+		dx = 1
+	}
+	if dx != 0 || dy != 0 {
+		g.movePlayer(g.playerA, dx, dy)
+	}
+
+	// Player B movement
+	dx, dy = 0, 0
+	if g.keysPressed['i'] {
+		dy = -1
+	}
+	if g.keysPressed['k'] {
+		dy = 1
+	}
+	if g.keysPressed['j'] {
+		dx = -1
+	}
+	if g.keysPressed['l'] {
+		dx = 1
+	}
+	if dx != 0 || dy != 0 {
+		g.movePlayer(g.playerB, dx, dy)
+	}
+
+	// Clear key states after processing (key must be held continuously)
+	g.keysPressed = make(map[byte]bool)
 }
 
 func (g *Game) movePlayer(p *Player, dx, dy int) {
 	newX := p.pos.x + dx
 	newY := p.pos.y + dy
 
-	if newX >= 1 && newX < fieldWidth-1 && newY >= 1 && newY < fieldHeight-1 {
-		p.pos.x = newX
-		p.pos.y = newY
+	// Check bounds
+	if newX < 1 || newX >= fieldWidth-1 || newY < 1 || newY >= fieldHeight-1 {
+		return
+	}
 
-		if p.pos.x == g.ball.pos.x && p.pos.y == g.ball.pos.y {
-			g.ball.vx = dx * 2
-			g.ball.vy = dy * 2
+	// Check collision with other player
+	otherPlayer := g.playerB
+	if p == g.playerB {
+		otherPlayer = g.playerA
+	}
+	if newX == otherPlayer.pos.x && newY == otherPlayer.pos.y {
+		return // Can't move into another player
+	}
+
+	// Check if player is next to ball before moving
+	ballDx := g.ball.pos.x - p.pos.x
+	ballDy := g.ball.pos.y - p.pos.y
+	distToBall := abs(ballDx) + abs(ballDy)
+
+	p.pos.x = newX
+	p.pos.y = newY
+
+	// Dribbling: only when moving towards the ball from the right direction
+	if distToBall == 1 {
+		// Check if player is moving towards the ball
+		// Player should be on the opposite side of where they're moving
+		movingTowardsBall := false
+		if dx != 0 && dx == sign(ballDx) && ballDy == 0 {
+			// Moving horizontally towards ball that's directly left/right
+			movingTowardsBall = true
+		} else if dy != 0 && dy == sign(ballDy) && ballDx == 0 {
+			// Moving vertically towards ball that's directly up/down
+			movingTowardsBall = true
+		}
+
+		if movingTowardsBall {
+			// Push the ball in the direction of movement with randomness
+			randomX := 0.0
+			randomY := 0.0
+			if dribbleRandomness > 0 {
+				randomX = (rand.Float64() - 0.5) * 2 * dribbleRandomness
+				randomY = (rand.Float64() - 0.5) * 2 * dribbleRandomness
+			}
+
+			ballVx := int(float64(dx*dribblePowerHorizontal) * (1 + randomX))
+			ballVy := int(float64(dy*dribblePowerVertical) * (1 + randomY))
+
+			g.ball.vx = ballVx
+			g.ball.vy = ballVy
 			g.lastBallHit = p.char
 		}
 	}
+}
+
+func sign(x int) int {
+	if x > 0 {
+		return 1
+	} else if x < 0 {
+		return -1
+	}
+	return 0
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func (g *Game) updateBall() {
@@ -161,8 +285,8 @@ func (g *Game) updateBall() {
 		g.ball.pos.y += g.ball.vy
 	}
 
-	goalTop := fieldHeight/2 - 2
-	goalBottom := fieldHeight/2 + 2
+	goalTop := fieldHeight/2 - goalSize/2
+	goalBottom := fieldHeight/2 + goalSize/2
 
 	if g.ball.pos.x <= 0 {
 		if g.ball.pos.y >= goalTop && g.ball.pos.y <= goalBottom {
@@ -184,16 +308,29 @@ func (g *Game) updateBall() {
 		}
 	}
 
+	// Apply friction
 	if g.ball.vx > 0 {
-		g.ball.vx--
+		g.ball.vx -= ballFriction
+		if g.ball.vx < 0 {
+			g.ball.vx = 0
+		}
 	} else if g.ball.vx < 0 {
-		g.ball.vx++
+		g.ball.vx += ballFriction
+		if g.ball.vx > 0 {
+			g.ball.vx = 0
+		}
 	}
 
 	if g.ball.vy > 0 {
-		g.ball.vy--
+		g.ball.vy -= ballFriction
+		if g.ball.vy < 0 {
+			g.ball.vy = 0
+		}
 	} else if g.ball.vy < 0 {
-		g.ball.vy++
+		g.ball.vy += ballFriction
+		if g.ball.vy > 0 {
+			g.ball.vy = 0
+		}
 	}
 
 	if g.ball.pos.x == g.playerA.pos.x && g.ball.pos.y == g.playerA.pos.y {
@@ -207,10 +344,12 @@ func (g *Game) updateBall() {
 }
 
 func (g *Game) resetBall() {
-	g.ball.pos = Position{x: fieldWidth / 2, y: fieldHeight / 2}
+	g.ball.pos = g.ballStart
 	g.ball.vx = 0
 	g.ball.vy = 0
-	time.Sleep(1 * time.Second)
+	g.playerA.pos = g.playerAStart
+	g.playerB.pos = g.playerBStart
+	time.Sleep(resetDelay)
 }
 
 func (g *Game) render() {
@@ -236,8 +375,8 @@ func (g *Game) render() {
 	}
 
 	// Draw goals (openings in the walls)
-	goalTop := fieldHeight/2 - 2
-	goalBottom := fieldHeight/2 + 2
+	goalTop := fieldHeight/2 - goalSize/2
+	goalBottom := fieldHeight/2 + goalSize/2
 	for i := goalTop; i <= goalBottom; i++ {
 		field[i][0] = ' '
 		field[i][fieldWidth-1] = ' '

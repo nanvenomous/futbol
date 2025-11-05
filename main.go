@@ -2,11 +2,14 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"math/rand"
-	"os"
 	"time"
 
-	"golang.org/x/term"
+	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/text"
+	"golang.org/x/image/font/basicfont"
 )
 
 // Game tuning constants
@@ -31,6 +34,23 @@ const (
 
 	// Player starting positions (offset from edges)
 	playerStartOffset = 6
+
+	// Rendering
+	cellSize     = 16
+	topMargin    = 48
+	bottomMargin = 48
+	screenWidth  = fieldWidth * cellSize
+	screenHeight = topMargin + fieldHeight*cellSize + bottomMargin
+	borderWidth  = 2.0
+)
+
+var (
+	backgroundColor = color.RGBA{R: 12, G: 28, B: 44, A: 255}
+	pitchColor      = color.RGBA{R: 22, G: 90, B: 52, A: 255}
+	borderColor     = color.RGBA{R: 220, G: 220, B: 220, A: 255}
+	playerAColor    = color.RGBA{R: 244, G: 105, B: 98, A: 255}
+	playerBColor    = color.RGBA{R: 93, G: 173, B: 255, A: 255}
+	ballColor       = color.RGBA{R: 255, G: 235, B: 153, A: 255}
 )
 
 type Position struct {
@@ -53,149 +73,172 @@ type Game struct {
 	playerA      *Player
 	playerB      *Player
 	ball         *Ball
-	running      bool
 	lastBallHit  rune
 	playerAStart Position
 	playerBStart Position
 	ballStart    Position
-	keysPressed  map[byte]bool
+
+	statusText  string
+	lastTick    time.Time
+	accumulator time.Duration
+	resetTimer  time.Duration
+	gameOver    bool
 }
 
 func main() {
-	var err = game()
-	if err != nil {
+	rand.Seed(time.Now().UnixNano())
+
+	game := newGame()
+
+	ebiten.SetWindowTitle("Footerm")
+	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
+	ebiten.SetWindowSize(screenWidth, screenHeight)
+
+	if err := ebiten.RunGame(game); err != nil && err != ebiten.Termination {
 		panic(err)
 	}
 }
 
-func game() error {
-	// rand.Seed(time.Now().UnixNano())
-
+func newGame() *Game {
 	playerAStart := Position{x: playerStartOffset, y: fieldHeight / 2}
 	playerBStart := Position{x: fieldWidth - playerStartOffset - 1, y: fieldHeight / 2}
 	ballStart := Position{x: fieldWidth / 2, y: fieldHeight / 2}
 
-	g := &Game{
-		playerA:      &Player{pos: playerAStart, char: 'a'},
-		playerB:      &Player{pos: playerBStart, char: 'b'},
+	return &Game{
+		playerA:      &Player{pos: playerAStart, char: 'A'},
+		playerB:      &Player{pos: playerBStart, char: 'B'},
 		ball:         &Ball{pos: ballStart},
-		running:      true,
 		playerAStart: playerAStart,
 		playerBStart: playerBStart,
 		ballStart:    ballStart,
-		keysPressed:  make(map[byte]bool),
+		statusText:   "Kick-off!",
+		lastTick:     time.Now(),
+	}
+}
+
+func (g *Game) Update() error {
+	if ebiten.IsKeyPressed(ebiten.KeyQ) {
+		return ebiten.Termination
 	}
 
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		return err
+	now := time.Now()
+	elapsed := now.Sub(g.lastTick)
+	g.lastTick = now
+
+	if g.gameOver {
+		if ebiten.IsKeyPressed(ebiten.KeySpace) {
+			g.resetMatch()
+		}
+		return nil
 	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
-	// Clear screen and hide cursor
-	fmt.Print("\033[2J\033[?25l")
+	if g.resetTimer > 0 {
+		if elapsed >= g.resetTimer {
+			g.resetTimer = 0
+			g.statusText = "Kick-off!"
+		} else {
+			g.resetTimer -= elapsed
+		}
+		return nil
+	}
 
-	inputChan := make(chan byte, 10)
-	go readInput(inputChan)
+	g.accumulator += elapsed
+	for g.accumulator >= tickRate {
+		g.accumulator -= tickRate
 
-	ticker := time.NewTicker(tickRate)
-	defer ticker.Stop()
+		g.handleMovement()
+		g.updateBall()
 
-	for g.running {
-		select {
-		case <-ticker.C:
-			g.handleMovement()
-			g.updateBall()
-			g.render()
-
-			if g.playerA.score >= winScore || g.playerB.score >= winScore {
-				g.running = false
+		if g.playerA.score >= winScore || g.playerB.score >= winScore {
+			if g.playerA.score > g.playerB.score {
+				g.statusText = "Player A wins! Press Space to restart."
+			} else {
+				g.statusText = "Player B wins! Press Space to restart."
 			}
-		case key := <-inputChan:
-			g.handleInput(key)
-		default:
-			// Non-blocking
+			g.gameOver = true
+			break
 		}
 	}
-
-	// Show cursor again
-	fmt.Print("\033[?25h\033[2J\033[H")
-	fmt.Print("\r\n\r\n")
-	fmt.Print("GAME OVER!\r\n")
-	fmt.Printf("Player A: %d\r\n", g.playerA.score)
-	fmt.Printf("Player B: %d\r\n", g.playerB.score)
-	if g.playerA.score > g.playerB.score {
-		fmt.Print("Player A wins!\r\n")
-	} else {
-		fmt.Print("Player B wins!\r\n")
-	}
-	fmt.Print("\r\n")
 
 	return nil
 }
 
-func readInput(ch chan byte) {
-	buf := make([]byte, 1)
-	for {
-		n, err := os.Stdin.Read(buf)
-		if err != nil || n == 0 {
-			continue
+func (g *Game) Draw(screen *ebiten.Image) {
+	screen.Fill(backgroundColor)
+
+	// Draw pitch background
+	ebitenutil.DrawRect(screen, 0, float64(topMargin), float64(screenWidth), float64(fieldHeight*cellSize), pitchColor)
+
+	drawBorders(screen)
+
+	// Draw players and ball
+	drawPlayer(screen, g.playerA.pos, playerAColor)
+	drawPlayer(screen, g.playerB.pos, playerBColor)
+	drawBall(screen, g.ball.pos)
+
+	// Scoreboard and messages
+	scoreText := fmt.Sprintf("Player A: %d   Player B: %d   First to %d", g.playerA.score, g.playerB.score, winScore)
+	text.Draw(screen, scoreText, basicfont.Face7x13, 16, 24, color.White)
+
+	status := g.statusText
+	if g.resetTimer > 0 {
+		countdown := fmt.Sprintf("Resuming in %.1fs", g.resetTimer.Seconds())
+		if status != "" {
+			status = fmt.Sprintf("%s  %s", status, countdown)
+		} else {
+			status = countdown
 		}
-		ch <- buf[0]
 	}
+	if status != "" {
+		text.Draw(screen, status, basicfont.Face7x13, 16, topMargin-16, color.White)
+	}
+
+	text.Draw(screen, "Controls: Player A (WASD) | Player B (IJKL) | Press Q to quit", basicfont.Face7x13,
+		16, screenHeight-16, color.White)
 }
 
-func (g *Game) handleInput(key byte) {
-	switch key {
-	case 'q':
-		g.running = false
-	case 'w', 's', 'a', 'd', 'i', 'k', 'j', 'l':
-		g.keysPressed[key] = true
-	case 27: // ESC - in case terminal sends escape sequences
-		// Clear any stuck keys
-		g.keysPressed = make(map[byte]bool)
-	}
+func (g *Game) Layout(_, _ int) (int, int) {
+	return screenWidth, screenHeight
 }
 
 func (g *Game) handleMovement() {
 	// Player A movement
-	dx, dy := 0, 0
-	if g.keysPressed['w'] {
-		dy = -1
-	}
-	if g.keysPressed['s'] {
-		dy = 1
-	}
-	if g.keysPressed['a'] {
-		dx = -1
-	}
-	if g.keysPressed['d'] {
-		dx = 1
-	}
+	dx, dy := movementVector(ebiten.KeyA, ebiten.KeyD, ebiten.KeyW, ebiten.KeyS)
 	if dx != 0 || dy != 0 {
 		g.movePlayer(g.playerA, dx, dy)
 	}
 
 	// Player B movement
-	dx, dy = 0, 0
-	if g.keysPressed['i'] {
-		dy = -1
-	}
-	if g.keysPressed['k'] {
-		dy = 1
-	}
-	if g.keysPressed['j'] {
-		dx = -1
-	}
-	if g.keysPressed['l'] {
-		dx = 1
-	}
+	dx, dy = movementVector(ebiten.KeyJ, ebiten.KeyL, ebiten.KeyI, ebiten.KeyK)
 	if dx != 0 || dy != 0 {
 		g.movePlayer(g.playerB, dx, dy)
 	}
+}
 
-	// Clear key states after processing (key must be held continuously)
-	g.keysPressed = make(map[byte]bool)
+func movementVector(left, right, up, down ebiten.Key) (int, int) {
+	dx, dy := 0, 0
+
+	leftPressed := ebiten.IsKeyPressed(left)
+	rightPressed := ebiten.IsKeyPressed(right)
+	if leftPressed != rightPressed { // only move if exactly one direction held
+		if leftPressed {
+			dx = -1
+		} else {
+			dx = 1
+		}
+	}
+
+	upPressed := ebiten.IsKeyPressed(up)
+	downPressed := ebiten.IsKeyPressed(down)
+	if upPressed != downPressed {
+		if upPressed {
+			dy = -1
+		} else {
+			dy = 1
+		}
+	}
+
+	return dx, dy
 }
 
 func (g *Game) movePlayer(p *Player, dx, dy int) {
@@ -226,19 +269,14 @@ func (g *Game) movePlayer(p *Player, dx, dy int) {
 
 	// Dribbling: only when moving towards the ball from the right direction
 	if distToBall == 1 {
-		// Check if player is moving towards the ball
-		// Player should be on the opposite side of where they're moving
 		movingTowardsBall := false
 		if dx != 0 && dx == sign(ballDx) && ballDy == 0 {
-			// Moving horizontally towards ball that's directly left/right
 			movingTowardsBall = true
 		} else if dy != 0 && dy == sign(ballDy) && ballDx == 0 {
-			// Moving vertically towards ball that's directly up/down
 			movingTowardsBall = true
 		}
 
 		if movingTowardsBall {
-			// Push the ball in the direction of movement with randomness
 			randomX := 0.0
 			randomY := 0.0
 			if dribbleRandomness > 0 {
@@ -254,22 +292,6 @@ func (g *Game) movePlayer(p *Player, dx, dy int) {
 			g.lastBallHit = p.char
 		}
 	}
-}
-
-func sign(x int) int {
-	if x > 0 {
-		return 1
-	} else if x < 0 {
-		return -1
-	}
-	return 0
-}
-
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
 }
 
 func (g *Game) updateBall() {
@@ -291,7 +313,7 @@ func (g *Game) updateBall() {
 	if g.ball.pos.x <= 0 {
 		if g.ball.pos.y >= goalTop && g.ball.pos.y <= goalBottom {
 			g.playerB.score++
-			g.resetBall()
+			g.resetAfterGoal("Player B scores!")
 		} else {
 			g.ball.vx = -g.ball.vx
 			g.ball.pos.x = 1
@@ -301,7 +323,7 @@ func (g *Game) updateBall() {
 	if g.ball.pos.x >= fieldWidth-1 {
 		if g.ball.pos.y >= goalTop && g.ball.pos.y <= goalBottom {
 			g.playerA.score++
-			g.resetBall()
+			g.resetAfterGoal("Player A scores!")
 		} else {
 			g.ball.vx = -g.ball.vx
 			g.ball.pos.x = fieldWidth - 2
@@ -343,60 +365,95 @@ func (g *Game) updateBall() {
 	}
 }
 
-func (g *Game) resetBall() {
+func (g *Game) resetAfterGoal(message string) {
 	g.ball.pos = g.ballStart
 	g.ball.vx = 0
 	g.ball.vy = 0
 	g.playerA.pos = g.playerAStart
 	g.playerB.pos = g.playerBStart
-	time.Sleep(resetDelay)
+	g.accumulator = 0
+	g.resetTimer = resetDelay
+	g.statusText = message
 }
 
-func (g *Game) render() {
-	// Move cursor to top-left
-	fmt.Print("\033[H")
+func (g *Game) resetMatch() {
+	g.playerA.score = 0
+	g.playerB.score = 0
+	g.ball.pos = g.ballStart
+	g.ball.vx = 0
+	g.ball.vy = 0
+	g.playerA.pos = g.playerAStart
+	g.playerB.pos = g.playerBStart
+	g.accumulator = 0
+	g.resetTimer = 0
+	g.statusText = "Kick-off!"
+	g.gameOver = false
+}
 
-	field := make([][]rune, fieldHeight)
-	for i := range field {
-		field[i] = make([]rune, fieldWidth)
-		for j := range field[i] {
-			field[i][j] = ' '
+func drawBorders(screen *ebiten.Image) {
+	goalTop := fieldHeight/2 - goalSize/2
+	goalBottom := fieldHeight/2 + goalSize/2
+
+	// Top and bottom borders
+	ebitenutil.DrawRect(screen, 0, float64(topMargin), float64(screenWidth), borderWidth, borderColor)
+	ebitenutil.DrawRect(screen, 0, float64(topMargin+fieldHeight*cellSize)-borderWidth, float64(screenWidth), borderWidth, borderColor)
+
+	// Left border (split for goal)
+	if goalTop > 0 {
+		height := float64(goalTop * cellSize)
+		ebitenutil.DrawRect(screen, 0, float64(topMargin), borderWidth, height, borderColor)
+	}
+	if goalBottom < fieldHeight-1 {
+		startY := float64(topMargin + (goalBottom+1)*cellSize)
+		height := float64((fieldHeight - goalBottom - 1) * cellSize)
+		if height > 0 {
+			ebitenutil.DrawRect(screen, 0, startY, borderWidth, height, borderColor)
 		}
 	}
 
-	// Draw borders
-	for i := 0; i < fieldWidth; i++ {
-		field[0][i] = '-'
-		field[fieldHeight-1][i] = '-'
+	// Right border (split for goal)
+	x := float64(screenWidth) - borderWidth
+	if goalTop > 0 {
+		height := float64(goalTop * cellSize)
+		ebitenutil.DrawRect(screen, x, float64(topMargin), borderWidth, height, borderColor)
 	}
-	for i := 0; i < fieldHeight; i++ {
-		field[i][0] = '|'
-		field[i][fieldWidth-1] = '|'
+	if goalBottom < fieldHeight-1 {
+		startY := float64(topMargin + (goalBottom+1)*cellSize)
+		height := float64((fieldHeight - goalBottom - 1) * cellSize)
+		if height > 0 {
+			ebitenutil.DrawRect(screen, x, startY, borderWidth, height, borderColor)
+		}
 	}
+}
 
-	// Draw goals (openings in the walls)
-	goalTop := fieldHeight/2 - goalSize/2
-	goalBottom := fieldHeight/2 + goalSize/2
-	for i := goalTop; i <= goalBottom; i++ {
-		field[i][0] = ' '
-		field[i][fieldWidth-1] = ' '
+func drawPlayer(screen *ebiten.Image, pos Position, col color.Color) {
+	margin := float64(cellSize) * 0.2
+	x := float64(pos.x*cellSize) + margin
+	y := float64(topMargin+pos.y*cellSize) + margin
+	size := float64(cellSize) - margin*2
+	ebitenutil.DrawRect(screen, x, y, size, size, col)
+}
+
+func drawBall(screen *ebiten.Image, pos Position) {
+	margin := float64(cellSize) * 0.35
+	x := float64(pos.x*cellSize) + margin
+	y := float64(topMargin+pos.y*cellSize) + margin
+	size := float64(cellSize) - margin*2
+	ebitenutil.DrawRect(screen, x, y, size, size, ballColor)
+}
+
+func sign(x int) int {
+	if x > 0 {
+		return 1
+	} else if x < 0 {
+		return -1
 	}
+	return 0
+}
 
-	// Place players and ball
-	field[g.playerA.pos.y][g.playerA.pos.x] = g.playerA.char
-	field[g.playerB.pos.y][g.playerB.pos.x] = g.playerB.char
-	field[g.ball.pos.y][g.ball.pos.x] = 'o'
-
-	// Print score
-	fmt.Printf("Player A: %d | Player B: %d | First to %d wins! | Press 'q' to quit\r\n",
-		g.playerA.score, g.playerB.score, winScore)
-
-	// Print field
-	for i := range field {
-		fmt.Print(string(field[i]))
-		fmt.Print("\r\n")
+func abs(x int) int {
+	if x < 0 {
+		return -x
 	}
-
-	// Print controls
-	fmt.Print("Controls: Player A (WASD) | Player B (IJKL)\r\n")
+	return x
 }

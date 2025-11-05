@@ -1,4 +1,4 @@
-module github.com/nanvenomous/footerm
+module github.com/nanvenomous/futbol
 
 go 1.25.3
 

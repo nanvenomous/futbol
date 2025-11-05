@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/text"
+	"github.com/hajimehoshi/ebiten/v2/vector"
 	"golang.org/x/image/font/basicfont"
 )
 
@@ -28,6 +28,7 @@ const (
 	dribblePowerHorizontal = 2 // Horizontal kick strength
 	dribblePowerVertical   = 1 // Vertical kick strength
 	ballFriction           = 1 // Amount velocity decreases per tick
+	maxBallSpeed           = 3
 
 	// Dribbling randomness (0.0 = none, 1.0 = max)
 	dribbleRandomness = 0
@@ -167,7 +168,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(backgroundColor)
 
 	// Draw pitch background
-	ebitenutil.DrawRect(screen, 0, float64(topMargin), float64(screenWidth), float64(fieldHeight*cellSize), pitchColor)
+	fillRect(screen, 0, float64(topMargin), float64(screenWidth), float64(fieldHeight*cellSize), pitchColor)
 
 	drawBorders(screen)
 
@@ -302,9 +303,17 @@ func (g *Game) updateBall() {
 	g.ball.pos.x += g.ball.vx
 	g.ball.pos.y += g.ball.vy
 
-	if g.ball.pos.y <= 0 || g.ball.pos.y >= fieldHeight-1 {
-		g.ball.vy = -g.ball.vy
-		g.ball.pos.y += g.ball.vy
+	bouncedX := false
+	bouncedY := false
+
+	if g.ball.pos.y <= 0 {
+		g.ball.pos.y = 1
+		g.bounceVertically()
+		bouncedY = true
+	} else if g.ball.pos.y >= fieldHeight-1 {
+		g.ball.pos.y = fieldHeight - 2
+		g.bounceVertically()
+		bouncedY = true
 	}
 
 	goalTop := fieldHeight/2 - goalSize/2
@@ -315,43 +324,47 @@ func (g *Game) updateBall() {
 			g.playerB.score++
 			g.resetAfterGoal("Player B scores!")
 		} else {
-			g.ball.vx = -g.ball.vx
 			g.ball.pos.x = 1
+			g.bounceHorizontally()
+			bouncedX = true
 		}
-	}
-
-	if g.ball.pos.x >= fieldWidth-1 {
+	} else if g.ball.pos.x >= fieldWidth-1 {
 		if g.ball.pos.y >= goalTop && g.ball.pos.y <= goalBottom {
 			g.playerA.score++
 			g.resetAfterGoal("Player A scores!")
 		} else {
-			g.ball.vx = -g.ball.vx
 			g.ball.pos.x = fieldWidth - 2
+			g.bounceHorizontally()
+			bouncedX = true
 		}
 	}
 
 	// Apply friction
-	if g.ball.vx > 0 {
-		g.ball.vx -= ballFriction
-		if g.ball.vx < 0 {
-			g.ball.vx = 0
-		}
-	} else if g.ball.vx < 0 {
-		g.ball.vx += ballFriction
+	if !bouncedX {
 		if g.ball.vx > 0 {
-			g.ball.vx = 0
+			g.ball.vx -= ballFriction
+			if g.ball.vx < 0 {
+				g.ball.vx = 0
+			}
+		} else if g.ball.vx < 0 {
+			g.ball.vx += ballFriction
+			if g.ball.vx > 0 {
+				g.ball.vx = 0
+			}
 		}
 	}
 
-	if g.ball.vy > 0 {
-		g.ball.vy -= ballFriction
-		if g.ball.vy < 0 {
-			g.ball.vy = 0
-		}
-	} else if g.ball.vy < 0 {
-		g.ball.vy += ballFriction
+	if !bouncedY {
 		if g.ball.vy > 0 {
-			g.ball.vy = 0
+			g.ball.vy -= ballFriction
+			if g.ball.vy < 0 {
+				g.ball.vy = 0
+			}
+		} else if g.ball.vy < 0 {
+			g.ball.vy += ballFriction
+			if g.ball.vy > 0 {
+				g.ball.vy = 0
+			}
 		}
 	}
 
@@ -363,6 +376,16 @@ func (g *Game) updateBall() {
 		g.ball.vx = -2
 		g.lastBallHit = g.playerB.char
 	}
+}
+
+func (g *Game) bounceHorizontally() {
+	g.ball.vx = clampNonZero(-g.ball.vx)
+	g.ball.vy = randomizeBounceSpeed(g.ball.vy)
+}
+
+func (g *Game) bounceVertically() {
+	g.ball.vy = clampNonZero(-g.ball.vy)
+	g.ball.vx = randomizeBounceSpeed(g.ball.vx)
 }
 
 func (g *Game) resetAfterGoal(message string) {
@@ -395,19 +418,19 @@ func drawBorders(screen *ebiten.Image) {
 	goalBottom := fieldHeight/2 + goalSize/2
 
 	// Top and bottom borders
-	ebitenutil.DrawRect(screen, 0, float64(topMargin), float64(screenWidth), borderWidth, borderColor)
-	ebitenutil.DrawRect(screen, 0, float64(topMargin+fieldHeight*cellSize)-borderWidth, float64(screenWidth), borderWidth, borderColor)
+	fillRect(screen, 0, float64(topMargin), float64(screenWidth), borderWidth, borderColor)
+	fillRect(screen, 0, float64(topMargin+fieldHeight*cellSize)-borderWidth, float64(screenWidth), borderWidth, borderColor)
 
 	// Left border (split for goal)
 	if goalTop > 0 {
 		height := float64(goalTop * cellSize)
-		ebitenutil.DrawRect(screen, 0, float64(topMargin), borderWidth, height, borderColor)
+		fillRect(screen, 0, float64(topMargin), borderWidth, height, borderColor)
 	}
 	if goalBottom < fieldHeight-1 {
 		startY := float64(topMargin + (goalBottom+1)*cellSize)
 		height := float64((fieldHeight - goalBottom - 1) * cellSize)
 		if height > 0 {
-			ebitenutil.DrawRect(screen, 0, startY, borderWidth, height, borderColor)
+			fillRect(screen, 0, startY, borderWidth, height, borderColor)
 		}
 	}
 
@@ -415,13 +438,13 @@ func drawBorders(screen *ebiten.Image) {
 	x := float64(screenWidth) - borderWidth
 	if goalTop > 0 {
 		height := float64(goalTop * cellSize)
-		ebitenutil.DrawRect(screen, x, float64(topMargin), borderWidth, height, borderColor)
+		fillRect(screen, x, float64(topMargin), borderWidth, height, borderColor)
 	}
 	if goalBottom < fieldHeight-1 {
 		startY := float64(topMargin + (goalBottom+1)*cellSize)
 		height := float64((fieldHeight - goalBottom - 1) * cellSize)
 		if height > 0 {
-			ebitenutil.DrawRect(screen, x, startY, borderWidth, height, borderColor)
+			fillRect(screen, x, startY, borderWidth, height, borderColor)
 		}
 	}
 }
@@ -431,7 +454,7 @@ func drawPlayer(screen *ebiten.Image, pos Position, col color.Color) {
 	x := float64(pos.x*cellSize) + margin
 	y := float64(topMargin+pos.y*cellSize) + margin
 	size := float64(cellSize) - margin*2
-	ebitenutil.DrawRect(screen, x, y, size, size, col)
+	fillRect(screen, x, y, size, size, col)
 }
 
 func drawBall(screen *ebiten.Image, pos Position) {
@@ -439,7 +462,47 @@ func drawBall(screen *ebiten.Image, pos Position) {
 	x := float64(pos.x*cellSize) + margin
 	y := float64(topMargin+pos.y*cellSize) + margin
 	size := float64(cellSize) - margin*2
-	ebitenutil.DrawRect(screen, x, y, size, size, ballColor)
+	fillRect(screen, x, y, size, size, ballColor)
+}
+
+func fillRect(dst *ebiten.Image, x, y, width, height float64, clr color.Color) {
+	vector.DrawFilledRect(dst, float32(x), float32(y), float32(width), float32(height), clr, false)
+}
+
+func clampNonZero(v int) int {
+	if v > 0 {
+		if v > maxBallSpeed {
+			return maxBallSpeed
+		}
+		return v
+	}
+	if v < 0 {
+		if v < -maxBallSpeed {
+			return -maxBallSpeed
+		}
+		return v
+	}
+	return randomSign()
+}
+
+func randomizeBounceSpeed(current int) int {
+	updated := current + rand.Intn(3) - 1
+	if updated > maxBallSpeed {
+		updated = maxBallSpeed
+	} else if updated < -maxBallSpeed {
+		updated = -maxBallSpeed
+	}
+	if updated == 0 {
+		updated = randomSign()
+	}
+	return updated
+}
+
+func randomSign() int {
+	if rand.Intn(2) == 0 {
+		return -1
+	}
+	return 1
 }
 
 func sign(x int) int {

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/text"
+	text "github.com/hajimehoshi/ebiten/v2/text/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 	"golang.org/x/image/font/basicfont"
 )
@@ -63,7 +63,11 @@ var (
 	ballColor       = color.RGBA{R: 250, G: 240, B: 200, A: 255}
 	shadowColor     = color.RGBA{R: 0, G: 0, B: 0, A: 90}
 )
-var gameStart = time.Now()
+var (
+	gameStart = time.Now()
+	hudFace   = text.NewGoXFace(basicfont.Face7x13)
+	hudAscent = hudFace.Metrics().HAscent
+)
 
 type vec2 struct {
 	X, Y float64
@@ -137,7 +141,8 @@ type Game struct {
 }
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
+	// deprecated: rand.Seed is deprecated: As of Go 1.20 there is no reason to call Seed with a random value.
+	// rand.Seed(time.Now().UnixNano())
 
 	g := newGame()
 
@@ -165,10 +170,6 @@ func newGame() *Game {
 }
 
 func (g *Game) Update() error {
-	if ebiten.IsKeyPressed(ebiten.KeyQ) {
-		return ebiten.Termination
-	}
-
 	now := time.Now()
 	dt := now.Sub(g.lastTick)
 	g.lastTick = now
@@ -446,21 +447,21 @@ func drawMidfield(screen *ebiten.Image) {
 	fillRect(screen, midX-1, float64(topMargin), 2, float64(fieldHeight*cellSize), lineColor)
 
 	centerY := float64(topMargin + fieldHeight*cellSize/2)
-	vector.DrawFilledCircle(screen, float32(midX), float32(centerY), float32(cellSize*2), lineColor, true)
-	vector.DrawFilledCircle(screen, float32(midX), float32(centerY), float32(cellSize*2-4), pitchColor, true)
+	vector.FillCircle(screen, float32(midX), float32(centerY), float32(cellSize*2), lineColor, true)
+	vector.FillCircle(screen, float32(midX), float32(centerY), float32(cellSize*2-4), pitchColor, true)
 }
 
 func drawShadow(screen *ebiten.Image, pos vec2, radius float64, clr color.RGBA) {
 	x, y := worldToScreen(pos)
 	y += 6
-	vector.DrawFilledCircle(screen, float32(x), float32(y), float32(radius), clr, true)
+	vector.FillCircle(screen, float32(x), float32(y), float32(radius), clr, true)
 }
 
 func drawPlayer(screen *ebiten.Image, p *Player) {
 	x, y := worldToScreen(p.pos)
 	bodyRadius := float32(playerRadius * float64(cellSize))
 
-	vector.DrawFilledCircle(screen, float32(x), float32(y), bodyRadius, p.color, true)
+	vector.FillCircle(screen, float32(x), float32(y), bodyRadius, p.color, true)
 
 	dir := p.lastDir
 	if dir.Length() == 0 {
@@ -471,43 +472,42 @@ func drawPlayer(screen *ebiten.Image, p *Player) {
 	eyeOffset := dir.Scale(playerRadius * float64(cellSize) * 0.45)
 	eyePosX := float32(x + eyeOffset.X)
 	eyePosY := float32(y + eyeOffset.Y)
-	vector.DrawFilledCircle(screen, eyePosX, eyePosY, bodyRadius*0.2, color.RGBA{A: 255}, true)
+	vector.FillCircle(screen, eyePosX, eyePosY, bodyRadius*0.2, color.RGBA{A: 255}, true)
 }
 
 func drawBall(screen *ebiten.Image, ball *Ball) {
 	x, y := worldToScreen(ball.pos)
 	r := float32(ballRadius * float64(cellSize))
-	vector.DrawFilledCircle(screen, float32(x), float32(y), r, ballColor, true)
+	vector.FillCircle(screen, float32(x), float32(y), r, ballColor, true)
 
 	spin := float32(math.Mod(time.Since(gameStart).Seconds()*4, 2*math.Pi))
-	vector.DrawFilledCircle(screen, float32(x)+float32(math.Cos(float64(spin)))*r*0.4, float32(y)+float32(math.Sin(float64(spin)))*r*0.4, r*0.25, color.RGBA{R: 230, G: 210, B: 180, A: 255}, true)
+	vector.FillCircle(screen, float32(x)+float32(math.Cos(float64(spin)))*r*0.4, float32(y)+float32(math.Sin(float64(spin)))*r*0.4, r*0.25, color.RGBA{R: 230, G: 210, B: 180, A: 255}, true)
 }
 
 func drawHUD(screen *ebiten.Image, a, b *Player, status string, resetTimer time.Duration) {
 	score := fmt.Sprintf("%s: %d   %s: %d   First to %d", a.name, a.score, b.name, b.score, winScore)
-	text.Draw(screen, score, basicfont.Face7x13, 24, 28, color.White)
+	drawHUDText(screen, score, 24, 28, color.White)
 
 	if resetTimer > 0 {
 		status = fmt.Sprintf("%s  Resuming in %.1fs", status, resetTimer.Seconds())
 	}
 	if status != "" {
-		text.Draw(screen, status, basicfont.Face7x13, 24, 52, color.White)
+		drawHUDText(screen, status, 24, 52, color.White)
 	}
 
-	text.Draw(screen, "Controls: Player A (WASD) | Player B (IJKL) | Press Q to quit", basicfont.Face7x13,
-		24, screenHeight-28, color.White)
+	drawHUDText(screen, "Controls: Player A (WASD) | Player B (IJKL)", 24, float64(screenHeight-28), color.White)
 }
 
 func fillRect(dst *ebiten.Image, x, y, width, height float64, clr color.Color) {
-	vector.DrawFilledRect(dst, float32(x), float32(y), float32(width), float32(height), clr, true)
+	vector.FillRect(dst, float32(x), float32(y), float32(width), float32(height), clr, true)
 }
 
 func strokeRect(dst *ebiten.Image, x, y, width, height float64, clr color.Color, thickness float64) {
 	t := float32(thickness)
-	vector.DrawFilledRect(dst, float32(x), float32(y), float32(width), t, clr, true)
-	vector.DrawFilledRect(dst, float32(x), float32(y+height-thickness), float32(width), t, clr, true)
-	vector.DrawFilledRect(dst, float32(x), float32(y), t, float32(height), clr, true)
-	vector.DrawFilledRect(dst, float32(x+width-thickness), float32(y), t, float32(height), clr, true)
+	vector.FillRect(dst, float32(x), float32(y), float32(width), t, clr, true)
+	vector.FillRect(dst, float32(x), float32(y+height-thickness), float32(width), t, clr, true)
+	vector.FillRect(dst, float32(x), float32(y), t, float32(height), clr, true)
+	vector.FillRect(dst, float32(x+width-thickness), float32(y), t, float32(height), clr, true)
 }
 
 func worldToScreen(pos vec2) (float64, float64) {
@@ -516,4 +516,17 @@ func worldToScreen(pos vec2) (float64, float64) {
 
 func (g *Game) Layout(_, _ int) (int, int) {
 	return screenWidth, screenHeight
+}
+
+func drawHUDText(screen *ebiten.Image, msg string, x, y float64, clr color.Color) {
+	if msg == "" {
+		return
+	}
+
+	op := &text.DrawOptions{}
+	op.GeoM.Translate(x, y-hudAscent)
+	if clr != nil {
+		op.ColorScale.ScaleWithColor(clr)
+	}
+	text.Draw(screen, msg, hudFace, op)
 }

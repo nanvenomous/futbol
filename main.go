@@ -28,8 +28,8 @@ const (
 const (
 	playerRadius        = 0.65
 	playerMaxSpeed      = 0.85
-	playerAcceleration  = 0.22
-	playerDrag          = 0.82
+	playerAcceleration  = 0.20
+	playerDrag          = 0.7
 	playerBumpStiffness = 0.35
 )
 
@@ -41,6 +41,8 @@ const (
 	ballBounceDamp    = 0.88
 	kickImpulse       = 1.25
 	maxBallSpeed      = 1.6
+	kickAimInfluence  = 0.45
+	kickSpeedTransfer = 0.55
 )
 
 // Rendering constants.
@@ -375,8 +377,23 @@ func (g *Game) handleBallPlayerCollision(p *Player) {
 		g.ball.vel = g.ball.vel.Sub(normal.Scale((1 + ballBounceDamp) * velAlongNormal))
 	}
 
-	kick := normal.Scale(kickImpulse)
-	g.ball.vel = g.ball.vel.Add(kick).Add(p.vel.Scale(0.35))
+	aimDir := normal
+	lastDir := p.lastDir.Normalize()
+	if lastDir.Length() > 0 {
+		blended := normal.Scale(1 - kickAimInfluence).Add(lastDir.Scale(kickAimInfluence))
+		if blended.Length() > 0 {
+			aimDir = blended.Normalize()
+		}
+	}
+
+	kick := aimDir.Scale(kickImpulse)
+
+	forwardSpeed := p.vel.Dot(aimDir)
+	if forwardSpeed > 0 {
+		kick = kick.Add(aimDir.Scale(forwardSpeed * kickSpeedTransfer))
+	}
+
+	g.ball.vel = g.ball.vel.Add(kick)
 	g.ball.vel = limit(g.ball.vel, maxBallSpeed)
 }
 
